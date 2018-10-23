@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import os
 import argparse
 import datetime
@@ -45,7 +47,7 @@ class Solver(object):
             self.net.total_loss, self.optimizer, global_step=self.global_step)
 
         gpu_options = tf.GPUOptions()
-        config = tf.ConfigProto(gpu_options=gpu_options)
+        config = tf.ConfigProto(gpu_options=gpu_options, log_device_placement=cfg.LOG_DEVICE_PLACEMENT)
         self.sess = tf.Session(config=config)
         self.sess.run(tf.global_variables_initializer())
 
@@ -128,6 +130,13 @@ def update_config_paths(data_dir, weights_file):
 
     cfg.WEIGHTS_FILE = os.path.join(cfg.WEIGHTS_DIR, weights_file)
 
+def print_parameter_info():
+    parameter_count = 0
+    for var in tf.trainable_variables():
+        print(var.name, end='\t\t')
+        print(var.shape)
+        parameter_count = parameter_count + reduce(lambda x, y: x * y, var.get_shape().as_list())
+    print("Total parameter : %d, i.e., %.0f MB" % (parameter_count, parameter_count/1024/256))
 
 def main():
     parser = argparse.ArgumentParser()
@@ -136,10 +145,13 @@ def main():
     parser.add_argument('--threshold', default=0.2, type=float)
     parser.add_argument('--iou_threshold', default=0.5, type=float)
     parser.add_argument('--gpu', default='', type=str)
+    parser.add_argument('--log_device_placement', default='', type=bool)
     args = parser.parse_args()
 
     if args.gpu is not None:
         cfg.GPU = args.gpu
+    if args.log_device_placement is not None:
+        cfg.LOG_DEVICE_PLACEMENT = args.log_device_placement
 
     if args.data_dir != cfg.DATA_PATH:
         update_config_paths(args.data_dir, args.weights)
@@ -150,6 +162,8 @@ def main():
     pascal = pascal_voc('train')
 
     solver = Solver(yolo, pascal)
+
+    print_parameter_info()
 
     print('Start training ...')
     solver.train()
