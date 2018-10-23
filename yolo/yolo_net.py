@@ -7,7 +7,7 @@ slim = tf.contrib.slim
 
 class YOLONet(object):
 
-    def __init__(self, is_training=True):
+    def __init__(self, is_training=True, device_setter=None):
         self.classes = cfg.CLASSES
         self.num_class = len(self.classes)
         self.image_size = cfg.IMAGE_SIZE
@@ -38,7 +38,7 @@ class YOLONet(object):
             name='images')
         self.logits = self.build_network(
             self.images, num_outputs=self.output_size, alpha=self.alpha,
-            is_training=is_training)
+            is_training=is_training, device_setter=device_setter)
 
         if is_training:
             self.labels = tf.placeholder(
@@ -54,8 +54,9 @@ class YOLONet(object):
                       alpha,
                       keep_prob=0.5,
                       is_training=True,
+                      device_setter=None,
                       scope='yolo'):
-        with tf.device('/device:CPU:0'):
+        with tf.device(device_setter):
             with tf.variable_scope(scope):
                 with slim.arg_scope(
                     [slim.conv2d, slim.fully_connected],
