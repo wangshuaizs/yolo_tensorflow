@@ -44,6 +44,8 @@ NOOBJECT_SCALE = 1.0
 CLASS_SCALE = 2.0
 COORD_SCALE = 5.0
 
+WEIGHT_DECAY = 0.0005
+
 
 #
 # solver parameter
@@ -75,3 +77,11 @@ SAVE_ITER = 1000
 THRESHOLD = 0.2
 
 IOU_THRESHOLD = 0.5
+
+
+#
+# runtime setup
+#
+
+LOG_DEVICE_PLACEMENT = False
+

@@ -8,11 +8,14 @@ import yolo.config as cfg
 
 
 class pascal_voc(object):
-    def __init__(self, phase, rebuild=False):
+    def __init__(self, phase, rebuild=False, batch_size=0):
         self.devkil_path = os.path.join(cfg.PASCAL_PATH, 'VOCdevkit')
         self.data_path = os.path.join(self.devkil_path, 'VOC2007')
         self.cache_path = cfg.CACHE_PATH
-        self.batch_size = cfg.BATCH_SIZE
+        if batch_size == 0 :
+            self.batch_size = cfg.BATCH_SIZE
+        else :
+            self.batch_size = batch_size
         self.image_size = cfg.IMAGE_SIZE
         self.cell_size = cfg.CELL_SIZE
         self.classes = cfg.CLASSES
