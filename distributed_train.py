@@ -15,89 +15,92 @@ slim = tf.contrib.slim
 
 class Solver(object):
 
-    def __init__(self, net, data, params, num_workers, server):
-        self.net = net
-        self.data = data
-        self.weights_file = cfg.WEIGHTS_FILE
-        self.max_iter = cfg.MAX_ITER
-        self.initial_learning_rate = cfg.LEARNING_RATE
-        self.decay_steps = cfg.DECAY_STEPS
-        self.decay_rate = cfg.DECAY_RATE
-        self.staircase = cfg.STAIRCASE
-        self.summary_iter = cfg.SUMMARY_ITER
-        self.save_iter = cfg.SAVE_ITER
-        self.output_dir = os.path.join(
-            cfg.OUTPUT_DIR, datetime.datetime.now().strftime('%Y_%m_%d_%H_%M'))
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-        self.save_cfg()
+    def __init__(self, net, data, params, num_workers, server, device_setter):
+        self.device_setter = device_setter
+        with tf.device(self.device_setter):
+            self.net = net
+            self.data = data
+            self.weights_file = cfg.WEIGHTS_FILE
+            self.max_iter = cfg.MAX_ITER
+            self.initial_learning_rate = cfg.LEARNING_RATE
+            self.decay_steps = cfg.DECAY_STEPS
+            self.decay_rate = cfg.DECAY_RATE
+            self.staircase = cfg.STAIRCASE
+            self.summary_iter = cfg.SUMMARY_ITER
+            self.save_iter = cfg.SAVE_ITER
+            self.output_dir = os.path.join(
+                cfg.OUTPUT_DIR, datetime.datetime.now().strftime('%Y_%m_%d_%H_%M'))
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+            self.save_cfg()
 
-        self.variable_to_restore = tf.global_variables()
-        self.saver = tf.train.Saver(self.variable_to_restore, max_to_keep=None)
-        self.ckpt_file = os.path.join(self.output_dir, 'yolo')
-        self.summary_op = tf.summary.merge_all()
-        self.writer = tf.summary.FileWriter(self.output_dir, flush_secs=60)
+            self.variable_to_restore = tf.global_variables()
+            self.saver = tf.train.Saver(self.variable_to_restore, max_to_keep=None)
+            self.ckpt_file = os.path.join(self.output_dir, 'yolo')
+            self.summary_op = tf.summary.merge_all()
+            self.writer = tf.summary.FileWriter(self.output_dir, flush_secs=60)
 
-        self.global_step = tf.train.create_global_step()
-        self.learning_rate = tf.train.exponential_decay(
-            self.initial_learning_rate, self.global_step, self.decay_steps,
-            self.decay_rate, self.staircase, name='learning_rate')
-        self.optimizer = tf.train.GradientDescentOptimizer(
-            learning_rate=self.learning_rate)
-        if params.job_name is not None:
-            self.optimizer = tf.train.SyncReplicasOptimizer(self.optimizer, 
-                replicas_to_aggregate=num_workers, 
-                total_num_replicas=num_workers)
-        self.train_op = slim.learning.create_train_op(
-            self.net.total_loss, self.optimizer, global_step=self.global_step)
+            self.global_step = tf.train.create_global_step()
+            self.learning_rate = tf.train.exponential_decay(
+                self.initial_learning_rate, self.global_step, self.decay_steps,
+                self.decay_rate, self.staircase, name='learning_rate')
+            self.optimizer = tf.train.MomentumOptimizer(learning_rate=self.learning_rate, momentum=0.9, use_nesterov=True)
+            '''self.optimizer = tf.train.GradientDescentOptimizer(
+                learning_rate=self.learning_rate)'''
+            if params.job_name is not None:
+                self.optimizer = tf.train.SyncReplicasOptimizer(self.optimizer, 
+                    replicas_to_aggregate=num_workers, 
+                    total_num_replicas=num_workers)
+            self.train_op = slim.learning.create_train_op(
+                self.net.total_loss, self.optimizer, global_step=self.global_step)
 
-        self.is_chief = 0
-        if params.job_name == "worker" and params.task_index == 0:
-            self.is_chief = 1
-            chief_queue_runner = self.optimizer.get_chief_queue_runner()
-            init_tokens_op = self.optimizer.get_init_tokens_op()
+            self.is_chief = 0
+            if params.job_name == "worker" and params.task_index == 0:
+                self.is_chief = 1
+                chief_queue_runner = self.optimizer.get_chief_queue_runner()
+                init_tokens_op = self.optimizer.get_init_tokens_op()
 
-        self.init_op = tf.global_variables_initializer()
-        self.sv = tf.train.Supervisor(is_chief=self.is_chief,
-                                 init_op=self.init_op,
-                                 recovery_wait_secs=1,
-                                 global_step=self.global_step)
+            self.init_op = tf.global_variables_initializer()
+            self.sv = tf.train.Supervisor(is_chief=self.is_chief,
+                                     init_op=self.init_op,
+                                     recovery_wait_secs=1,
+                                     global_step=self.global_step)
 
-        gpu_options = tf.GPUOptions()
-        config = tf.ConfigProto(gpu_options=gpu_options, log_device_placement=cfg.LOG_DEVICE_PLACEMENT)
-        if self.is_chief:
-            print("Worker %d: Initializing session..." % params.task_index)
-        else:
-            print("Worker %d: Waiting for session to be initialized..." % params.task_index)
-        self.sess = self.sv.prepare_or_wait_for_session(server.target, config=config)
-        print("Worker %d: Session initialization complete." % params.task_index)
-        if self.is_chief:
-            print("Starting chief queue runner and running init_tokens_op")
-            self.sv.start_queue_runners(self.sess, [chief_queue_runner])
-            self.sess.run(init_tokens_op)
+            gpu_options = tf.GPUOptions()
+            config = tf.ConfigProto(gpu_options=gpu_options, log_device_placement=cfg.LOG_DEVICE_PLACEMENT)
+            if self.is_chief:
+                print("Worker %d: Initializing session..." % params.task_index)
+            else:
+                print("Worker %d: Waiting for session to be initialized..." % params.task_index)
+            self.sess = self.sv.prepare_or_wait_for_session(server.target, config=config)
+            print("Worker %d: Session initialization complete." % params.task_index)
+            if self.is_chief:
+                print("Starting chief queue runner and running init_tokens_op")
+                self.sv.start_queue_runners(self.sess, [chief_queue_runner])
+                self.sess.run(init_tokens_op)
 
-        if self.weights_file is not None:
-            print('Restoring weights from: ' + self.weights_file)
-            self.saver.restore(self.sess, self.weights_file)
+            if self.weights_file is not None:
+                print('Restoring weights from: ' + self.weights_file)
+                self.saver.restore(self.sess, self.weights_file)
 
-        self.writer.add_graph(self.sess.graph)
+            self.writer.add_graph(self.sess.graph)
 
     def train(self):
 
-        train_timer = Timer()
-        load_timer = Timer()
+        with tf.device(self.device_setter):
+            train_timer = Timer()
+            load_timer = Timer()
 
-        for step in range(1, self.max_iter + 1):
+            for step in range(1, self.max_iter + 1):
 
-            load_timer.tic()
-            images, labels = self.data.get()
-            load_timer.toc()
-            feed_dict = {self.net.images: images,
-                         self.net.labels: labels}
+                load_timer.tic()
+                images, labels = self.data.get()
+                load_timer.toc()
+                feed_dict = {self.net.images: images,
+                             self.net.labels: labels}
+                print(step)
 
-            if step % self.summary_iter == 0:
-                if step % (self.summary_iter * 10) == 0:
-
+                if step % self.summary_iter == 0:
                     train_timer.tic()
                     summary_str, loss, _ = self.sess.run(
                         [self.summary_op, self.net.total_loss, self.train_op],
@@ -115,26 +118,18 @@ class Solver(object):
                         train_timer.remain(step, self.max_iter))
                     print(log_str)
 
+                    self.writer.add_summary(summary_str, step)                
                 else:
                     train_timer.tic()
-                    summary_str, _ = self.sess.run(
-                        [self.summary_op, self.train_op],
-                        feed_dict=feed_dict)
+                    self.sess.run(self.train_op, feed_dict=feed_dict)
                     train_timer.toc()
 
-                self.writer.add_summary(summary_str, step)
-
-            else:
-                train_timer.tic()
-                self.sess.run(self.train_op, feed_dict=feed_dict)
-                train_timer.toc()
-
-            if step % self.save_iter == 0:
-                print('{} Saving checkpoint file to: {}'.format(
-                    datetime.datetime.now().strftime('%m-%d %H:%M:%S'),
-                    self.output_dir))
-                self.saver.save(
-                    self.sess, self.ckpt_file, global_step=self.global_step)
+                if step % self.save_iter == 0:
+                    print('{} Saving checkpoint file to: {}'.format(
+                        datetime.datetime.now().strftime('%m-%d %H:%M:%S'),
+                        self.output_dir))
+                    self.saver.save(
+                        self.sess, self.ckpt_file, global_step=self.global_step)
 
     def save_cfg(self):
 
@@ -218,7 +213,7 @@ def main():
     yolo = YOLONet(device_setter=device_setter)
     pascal = pascal_voc('train')
 
-    solver = Solver(yolo, pascal, args, num_workers, server)
+    solver = Solver(yolo, pascal, args, num_workers, server, device_setter)
 
     print_parameter_info()
 

@@ -4,7 +4,6 @@ import yolo.config as cfg
 
 slim = tf.contrib.slim
 
-
 class YOLONet(object):
 
     def __init__(self, is_training=True, device_setter=None):
@@ -28,6 +27,7 @@ class YOLONet(object):
         self.learning_rate = cfg.LEARNING_RATE
         self.batch_size = cfg.BATCH_SIZE
         self.alpha = cfg.ALPHA
+        self.weight_decay = cfg.WEIGHT_DECAY
 
         self.offset = np.transpose(np.reshape(np.array(
             [np.arange(self.cell_size)] * self.cell_size * self.boxes_per_cell),
@@ -48,6 +48,140 @@ class YOLONet(object):
             self.total_loss = tf.losses.get_total_loss()
             tf.summary.scalar('total_loss', self.total_loss)
 
+    def _get_variable(self, name, shape, initializer, regularizer= None, trainable= True):
+        """Helper to create a Variable.
+        Args:
+          name: name of the Variable
+          shape: list of ints
+          initializer: initializer of Variable
+        Returns:
+          Variable Tensor
+        """
+        with tf.device('/cpu:0'):
+            var = tf.get_variable(name, 
+                                shape, 
+                                initializer=initializer, 
+                                dtype=tf.float32, 
+                                regularizer= regularizer, 
+                                trainable= trainable)
+        return var 
+
+
+    def _variable_with_weight_decay(self, name, shape, stddev, wd):
+        """Helper to create an initialized Variable with weight decay.
+        Note that the Variable is initialized with truncated normal distribution
+        A weight decay is added only if one is specified.
+        Args:
+          name: name of the variable 
+          shape: list of ints
+          stddev: standard devision of a truncated Gaussian
+          wd: add L2Loss weight decay multiplied by this float. If None, weight 
+          decay is not added for this Variable.
+        Returns:
+          Variable Tensor 
+        """
+        var = self._get_variable(name, 
+                                shape,
+                                tf.truncated_normal_initializer(stddev=stddev, dtype=tf.float32))
+        if wd is not None:
+            weight_decay = tf.multiply(tf.nn.l2_loss(var), wd, name='weight_loss')
+            #tf.add_to_collection('losses', weight_decay)
+        return var 
+
+    def conv2d(self, scope, input, kernel_size, padding='SAME', stride=1):
+        """convolutional layer
+        Args:
+          input: 4-D tensor [batch_size, height, width, depth]
+          scope: variable_scope name 
+          kernel_size: [k_height, k_width, in_channel, out_channel]
+          stride: int32
+        Return:
+          output: 4-D tensor [batch_size, height/stride, width/stride, out_channels]
+        """
+        with tf.variable_scope(scope) as scope:
+            kernel = self._variable_with_weight_decay('weights', 
+                                          shape=kernel_size,
+                                          stddev=5e-2,
+                                          wd=self.weight_decay)
+            conv = tf.nn.conv2d(input, kernel, [1, stride, stride, 1], padding=padding)
+            biases = self._get_variable('biases', kernel_size[3:], tf.constant_initializer(0.0))
+            bias = tf.nn.bias_add(conv, biases)
+            conv1 = self.leaky_relu(bias)
+
+        return conv1
+
+
+    def max_pool(self, scope, input, kernel_size, stride):
+        """max_pool layer
+        Args:
+          input: 4-D tensor [batch_zie, height, width, depth]
+          kernel_size: [k_height, k_width]
+          stride: int32
+        Return:
+          output: 4-D tensor [batch_size, height/stride, width/stride, depth]
+        """
+        with tf.variable_scope(scope) as scope:
+            pool1 = tf.nn.max_pool(input, 
+                            ksize=[1, kernel_size[0], kernel_size[1], 1], 
+                            strides=[1, stride, stride, 1],
+                            padding='SAME')
+
+        return pool1
+
+    def fully_connected(self, scope, input, in_dimension, out_dimension, leaky=True, pretrain=True, train=True):
+        """Fully connection layer
+        Args:
+          scope: variable_scope name
+          input: [batch_size, ???]
+          out_dimension: int32
+        Return:
+          output: 2-D tensor [batch_size, out_dimension]
+        """
+        with tf.variable_scope(scope) as scope:
+            reshape = tf.reshape(input, [tf.shape(input)[0], -1])
+
+            weights = self._variable_with_weight_decay('weights', 
+                                        shape=[in_dimension, out_dimension],
+                                        stddev=0.04, 
+                                        wd=self.weight_decay)
+            biases = self._get_variable('biases', 
+                                        shape=[out_dimension], 
+                                        initializer=tf.constant_initializer(0.0))
+            local = tf.matmul(reshape, weights) + biases
+
+            if leaky:
+                local = self.leaky_relu(local)
+            else:
+                local = tf.identity(local, name=scope.name)
+
+        return local
+
+    def flatten(self, scope, x):
+        shape = x.get_shape().as_list()
+        dim = 1
+        for i in xrange(1,len(shape)):
+            dim*=shape[i]
+        with tf.variable_scope(scope) as scope:
+            flattened_tensor = tf.reshape(x, [-1, dim])
+        return flattened_tensor
+
+    def leaky_relu(self, x, alpha=0.1, dtype=tf.float32):
+        """leaky relu 
+        if x > 0:
+          return x
+        else:
+          return alpha * x
+        Args:
+          x : Tensor
+          alpha: float
+        Return:
+          y : Tensor
+        """
+        x = tf.cast(x, dtype=dtype)
+        bool_mask = (x > 0)
+        mask = tf.cast(bool_mask, dtype=dtype)
+        return 1.0 * mask * x + alpha * (1 - mask) * x
+
     def build_network(self,
                       images,
                       num_outputs,
@@ -58,12 +192,55 @@ class YOLONet(object):
                       scope='yolo'):
         with tf.device(device_setter):
             with tf.variable_scope(scope):
+                '''net = tf.pad(images, 
+                        np.array([[0, 0], [3, 3], [3, 3], [0, 0]]),
+                        name='pad_1')
+                net = self.conv2d('conv_2', net, [7, 7, 3, 64], padding='VALID', stride=2)
+                net = self.max_pool('pool_3', net, [2, 2], 2)
+                net = self.conv2d('conv_4', net, [3, 3, 64, 192], stride=1)
+                net = self.max_pool('pool_5', net, [2, 2], 2)
+                net = self.conv2d('conv_6', net, [1, 1, 192, 128], stride=1)
+                net = self.conv2d('conv_7', net, [3, 3, 128, 256], stride=1)
+                net = self.conv2d('conv_8', net, [1, 1, 256, 256], stride=1)
+                net = self.conv2d('conv_9', net, [3, 3, 256, 512], stride=1)
+                net = self.max_pool('pool_10', net, [2, 2], 2)
+                net = self.conv2d('conv_11', net, [1, 1, 512, 256], stride=1)
+                net = self.conv2d('conv_12', net, [3, 3, 256, 512], stride=1)
+                net = self.conv2d('conv_13', net, [1, 1, 512, 256], stride=1)
+                net = self.conv2d('conv_14', net, [3, 3, 256, 512], stride=1)
+                net = self.conv2d('conv_15', net, [1, 1, 512, 256], stride=1)
+                net = self.conv2d('conv_16', net, [3, 3, 256, 512], stride=1)
+                net = self.conv2d('conv_17', net, [1, 1, 512, 256], stride=1)
+                net = self.conv2d('conv_18', net, [3, 3, 256, 512], stride=1)
+                net = self.conv2d('conv_19', net, [1, 1, 512, 512], stride=1)
+                net = self.conv2d('conv_20', net, [3, 3, 512, 1024], stride=1)
+                net = self.max_pool('pool_21', net, [2, 2], 2)
+                net = self.conv2d('conv_22', net, [1, 1, 1024, 512], stride=1)
+                net = self.conv2d('conv_23', net, [3, 3, 512, 1024], stride=1)
+                net = self.conv2d('conv_24', net, [1, 1, 1024, 512], stride=1)
+                net = self.conv2d('conv_25', net, [3, 3, 512, 1024], stride=1)
+                net = self.conv2d('conv_26', net, [3, 3, 1024, 1024], stride=1)
+                net = tf.pad(net, 
+                        np.array([[0, 0], [1, 1], [1, 1], [0, 0]]),
+                        name='pad_27')
+                net = self.conv2d('conv_28', net, [3, 3, 1024, 1024], padding='VALID', stride=2)
+                net = self.conv2d('conv_29', net, [3, 3, 1024, 1024], stride=1)
+                net = self.conv2d('conv_30', net, [3, 3, 1024, 1024], stride=1)
+                net = tf.transpose(net, [0, 3, 1, 2], name='trans_31')
+                net = self.flatten('flat_32', net)
+                net = self.fully_connected('fc_33', net, 49 * 1024, 4096)
+                net = tf.nn.dropout(net, 
+                            keep_prob=0.5, 
+                            name='dropout_34')
+                net = self.fully_connected('fc_35', net, 4096, self.output_size, leaky=False)
+
+                return net'''
                 with slim.arg_scope(
                     [slim.conv2d, slim.fully_connected],
                     activation_fn=leaky_relu(alpha),
+                    #activation_fn=relu(),
                     weights_regularizer=slim.l2_regularizer(0.0005),
-                    weights_initializer=tf.truncated_normal_initializer(0.0, 0.01)
-                ):
+                    weights_initializer=tf.truncated_normal_initializer(0.0, 0.01)):
                     net = tf.pad(
                         images, np.array([[0, 0], [3, 3], [3, 3], [0, 0]]),
                         name='pad_1')
@@ -102,13 +279,19 @@ class YOLONet(object):
                     net = slim.conv2d(net, 1024, 3, scope='conv_30')
                     net = tf.transpose(net, [0, 3, 1, 2], name='trans_31')
                     net = slim.flatten(net, scope='flat_32')
-                    net = slim.fully_connected(net, 512, scope='fc_33')
-                    net = slim.fully_connected(net, 4096, scope='fc_34')
+                    net = slim.fully_connected(net, 4096, scope='fc_33')
                     net = slim.dropout(
                         net, keep_prob=keep_prob, is_training=is_training,
-                        scope='dropout_35')
+                        scope='dropout_34')
                     net = slim.fully_connected(
-                        net, num_outputs, activation_fn=None, scope='fc_36')
+                        net, num_outputs, activation_fn=None, scope='fc_35')
+                    #net = slim.fully_connected(net, 512, scope='fc_33')
+                    #net = slim.fully_connected(net, 4096, scope='fc_34')
+                    #net = slim.dropout(
+                    #    net, keep_prob=keep_prob, is_training=is_training,
+                    #    scope='dropout_35')
+                    #net = slim.fully_connected(
+                    #    net, num_outputs, activation_fn=None, scope='fc_36')
         return net
 
     def calc_iou(self, boxes1, boxes2, scope='iou'):
@@ -244,4 +427,9 @@ class YOLONet(object):
 def leaky_relu(alpha):
     def op(inputs):
         return tf.nn.leaky_relu(inputs, alpha=alpha, name='leaky_relu')
+    return op
+
+def relu():
+    def op(inputs):
+        return tf.nn.relu(inputs, name='relu')
     return op
